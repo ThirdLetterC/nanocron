@@ -1,0 +1,577 @@
+/*
+ * tests.c - Comprehensive unit test suite for nanocron.h (C23)
+ *
+ * Covers: create/destroy, parsing (valid/invalid), firing, nanosecond
+ * precision, DOM/DOW vixie-cron rule, de-duplication, multiple jobs, removal,
+ *         next-trigger calculation.
+ *
+ * Compile:
+ *   gcc -std=c23 -Wall -Wextra -pedantic -O2 tests.c -o tests
+ *   ./tests
+ */
+
+#define CRON_IMPLEMENTATION
+#include "nanocron.h"
+
+#include <inttypes.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <time.h>
+
+static size_t tests_passed = 0;
+static size_t tests_failed = 0;
+
+#define TEST(name)                                                             \
+  do {                                                                         \
+    printf("Running: %s\n", #name);                                            \
+    if (run_test_##name()) {                                                   \
+      printf("  ✓ PASSED\n");                                                  \
+      tests_passed++;                                                          \
+    } else {                                                                   \
+      printf("  ✗ FAILED\n");                                                  \
+      tests_failed++;                                                          \
+    }                                                                          \
+  } while (0)
+
+static struct timespec make_ts(time_t sec, int32_t nsec) {
+  struct timespec ts = {.tv_sec = sec, .tv_nsec = nsec};
+  return ts;
+}
+
+static size_t callback_count = 0;
+static struct timespec last_call_ts = {0};
+static cron_job_t *self_remove_job = nullptr;
+static bool self_remove_result = false;
+static cron_job_t *other_job_handle = nullptr;
+static bool remove_other_result = false;
+static size_t remover_callback_count = 0;
+static size_t reentrant_callback_count = 0;
+
+static void test_callback([[maybe_unused]] void *user_data,
+                          [[maybe_unused]] const struct timespec *ts) {
+  callback_count++;
+  last_call_ts = *ts;
+}
+
+static void reset_callback() {
+  callback_count = 0;
+  last_call_ts.tv_sec = 0;
+  last_call_ts.tv_nsec = 0;
+}
+
+static void self_remove_callback(void *user_data,
+                                 [[maybe_unused]] const struct timespec *ts) {
+  cron_ctx_t *ctx = user_data;
+  callback_count++;
+  self_remove_result = cron_remove(ctx, self_remove_job);
+}
+
+static void remove_other_callback(void *user_data,
+                                  [[maybe_unused]] const struct timespec *ts) {
+  cron_ctx_t *ctx = user_data;
+  remover_callback_count++;
+
+  if (other_job_handle != nullptr) {
+    remove_other_result = cron_remove(ctx, other_job_handle);
+    if (remove_other_result) {
+      other_job_handle = nullptr;
+    }
+  }
+}
+
+static void reentrant_callback(void *user_data, const struct timespec *ts) {
+  cron_ctx_t *ctx = user_data;
+  reentrant_callback_count++;
+  if (reentrant_callback_count == 1) {
+    cron_execute_due(ctx, ts);
+  }
+}
+
+/* ================================================================ */
+
+static bool run_test_create_destroy() {
+  cron_ctx_t *ctx = cron_create();
+  if (!ctx)
+    return false;
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_invalid_schedules() {
+  cron_ctx_t *ctx = cron_create();
+  if (!ctx)
+    return false;
+
+  const char *bad[] = {"",                       /* empty */
+                       "* * * * *",              /* 5 fields */
+                       "* * * * * * * *",        /* 8 fields */
+                       "1000000000 * * * * * *", /* ns > 999999999 */
+                       "abc * * * * * *",        /* invalid token */
+                       "* 60 * * * * *",         /* sec > 59 */
+                       nullptr};
+
+  for (size_t i = 0; bad[i]; i++) {
+    if (cron_add(ctx, bad[i], test_callback, nullptr) != nullptr) {
+      cron_destroy(ctx);
+      return false;
+    }
+  }
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_every_second() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+
+  if (!cron_add(ctx, "0 * * * * * *", test_callback, nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0); /* 2025-02-17 10:30:00 UTC */
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* same instant → dedup */
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  t.tv_sec++;
+  cron_execute_due(ctx, &t);
+  if (callback_count != 2) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_nanosecond_precision() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+
+  if (!cron_add(ctx, "250000000,750000000 * * * * * *", test_callback,
+                nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 250000000);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  t.tv_nsec = 750000000;
+  cron_execute_due(ctx, &t);
+  if (callback_count != 2) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  t.tv_nsec = 500000000; /* must not fire */
+  cron_execute_due(ctx, &t);
+  if (callback_count != 2) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_dom_dow_logic() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+
+  /* 00:00:00.000 on the 1st of any month OR on Fridays (DOW=5) */
+  if (!cron_add(ctx, "0 0 0 0 1 * 5", test_callback, nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-01 00:00:00 (Saturday + 1st of month) → fires */
+  struct timespec t1 = make_ts(1738368000, 0);
+  cron_execute_due(ctx, &t1);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-07 00:00:00 (Friday, not 1st) → fires */
+  reset_callback();
+  struct timespec t2 = make_ts(1738886400, 0);
+  cron_execute_due(ctx, &t2);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-03 00:00:00 (Monday, neither) → no fire */
+  reset_callback();
+  struct timespec t3 = make_ts(1738531200, 0);
+  cron_execute_due(ctx, &t3);
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_weekdays() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+
+  /* 09:00:00.000 every Monday–Friday */
+  if (!cron_add(ctx, "0 0 0 9 * * 1-5", test_callback, nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-17 Monday 09:00:00 → fires */
+  struct timespec mon = make_ts(1739782800, 0);
+  cron_execute_due(ctx, &mon);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-16 Sunday 09:00:00 → no fire */
+  reset_callback();
+  struct timespec sun = make_ts(1739523600, 0);
+  cron_execute_due(ctx, &sun);
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_job_removal() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+
+  cron_job_t *job = cron_add(ctx, "0 * * * * * *", test_callback, nullptr);
+  if (!job) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (!cron_remove(ctx, job)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  reset_callback();
+  cron_execute_due(ctx, &t);
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_callback_self_removal() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  self_remove_job = nullptr;
+  self_remove_result = false;
+
+  self_remove_job = cron_add(ctx, "0 * * * * * *", self_remove_callback, ctx);
+  if (self_remove_job == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1 || !self_remove_result) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  t.tv_sec++;
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  self_remove_job = nullptr;
+  return true;
+}
+
+static bool run_test_callback_remove_other_job() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  other_job_handle = nullptr;
+  remove_other_result = false;
+  remover_callback_count = 0;
+
+  other_job_handle = cron_add(ctx, "0 * * * * * *", test_callback, nullptr);
+  if (other_job_handle == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (!cron_add(ctx, "0 * * * * * *", remove_other_callback, ctx)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t);
+  if (remover_callback_count != 1 || !remove_other_result ||
+      callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  t.tv_sec++;
+  cron_execute_due(ctx, &t);
+  if (callback_count != 0 || remover_callback_count != 2) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  other_job_handle = nullptr;
+  return true;
+}
+
+static bool run_test_reentrant_execute_due_dedup() {
+  cron_ctx_t *ctx = cron_create();
+  reentrant_callback_count = 0;
+
+  if (!cron_add(ctx, "0 * * * * * *", reentrant_callback, ctx)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t);
+  if (reentrant_callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  t.tv_sec++;
+  cron_execute_due(ctx, &t);
+  if (reentrant_callback_count != 2) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_next_trigger() {
+  cron_ctx_t *ctx = cron_create();
+
+  /* Weekdays at 09:30:00.000 */
+  if (!cron_add(ctx, "0 0 30 9 * * 1-5", test_callback, nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1739788200, 0); /* 2025-02-17 10:30 Monday */
+  struct timespec next;
+
+  bool found = cron_get_next_trigger(ctx, &after, &next);
+  if (!found) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* next trigger = 2025-02-18 09:30:00 (Tuesday) */
+  const int64_t expected_next = 1'739'871'000LL;
+  const int64_t observed_next = (int64_t)next.tv_sec;
+  if (observed_next != expected_next) {
+    fprintf(stderr, "  expected %" PRId64 ", got %" PRId64 "\n", expected_next,
+            observed_next);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_next_trigger_nanoseconds_and_strict() {
+  cron_ctx_t *ctx = cron_create();
+  if (!ctx) {
+    return false;
+  }
+
+  if (!cron_add(ctx, "0,500000000 * * * * * *", test_callback, nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1739788200, 0);
+  struct timespec next;
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (next.tv_sec != 1739788200 || next.tv_nsec != 500000000L) {
+    fprintf(stderr, "  expected 1739788200.500000000, got %lld.%09ld\n",
+            (long long)next.tv_sec, next.tv_nsec);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  after = make_ts(1739788200, 500000000);
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (next.tv_sec != 1739788201 || next.tv_nsec != 0) {
+    fprintf(stderr, "  expected 1739788201.000000000, got %lld.%09ld\n",
+            (long long)next.tv_sec, next.tv_nsec);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_next_trigger_dom_dow_logic() {
+  cron_ctx_t *ctx = cron_create();
+  if (!ctx) {
+    return false;
+  }
+
+  /* 00:00:00.000 on day-of-month=1 OR day-of-week=Friday */
+  if (!cron_add(ctx, "0 0 0 0 1 * 5", test_callback, nullptr)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1738540800, 0); /* 2025-02-03 Monday */
+  struct timespec next;
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (next.tv_sec != 1738886400 || next.tv_nsec != 0) {
+    fprintf(stderr, "  expected 1738886400.000000000, got %lld.%09ld\n",
+            (long long)next.tv_sec, next.tv_nsec);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  after = make_ts(1738886400, 0); /* exactly at Friday trigger */
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (next.tv_sec != 1739491200 || next.tv_nsec != 0) {
+    fprintf(stderr, "  expected 1739491200.000000000, got %lld.%09ld\n",
+            (long long)next.tv_sec, next.tv_nsec);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_multiple_jobs() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+
+  cron_job_t *job_a = cron_add(ctx, "0 * * * * * *", test_callback,
+                               nullptr); /* every second at ns=0 */
+  if (job_a == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+  cron_job_t *job_b = cron_add(ctx, "500000000 * * * * * *", test_callback,
+                               nullptr); /* every .5s */
+  if (job_b == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t1 = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t1);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t2 = make_ts(1739788200, 500000000);
+  reset_callback();
+  cron_execute_due(ctx, &t2);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+/* ================================================================ */
+
+int main() {
+  printf("=== nanocron.h Test Suite (C23) ===\n\n");
+
+  TEST(create_destroy);
+  TEST(invalid_schedules);
+  TEST(every_second);
+  TEST(nanosecond_precision);
+  TEST(dom_dow_logic);
+  TEST(weekdays);
+  TEST(job_removal);
+  TEST(callback_self_removal);
+  TEST(callback_remove_other_job);
+  TEST(next_trigger);
+  TEST(next_trigger_nanoseconds_and_strict);
+  TEST(next_trigger_dom_dow_logic);
+  TEST(reentrant_execute_due_dedup);
+  TEST(multiple_jobs);
+
+  printf("\n=== SUMMARY ===\n");
+  printf("Passed: %zu\n", tests_passed);
+  printf("Failed: %zu\n", tests_failed);
+
+  if (tests_failed == 0) {
+    printf("ALL TESTS PASSED\n");
+    return 0;
+  } else {
+    printf("%zu test(s) FAILED\n", tests_failed);
+    return 1;
+  }
+}
