@@ -1,5 +1,5 @@
 /*
- * tests.c - Comprehensive unit test suite for nanocron.h (C23)
+ * tests.c - Comprehensive unit test suite for nanocron (C23)
  *
  * Covers: create/destroy, parsing (valid/invalid), firing, nanosecond
  * precision, DOM/DOW vixie-cron rule, de-duplication, multiple jobs, removal,
@@ -10,8 +10,7 @@
  *   ./tests
  */
 
-#define CRON_IMPLEMENTATION
-#include "nanocron.h"
+#include "nanocron/nanocron.h"
 
 #include <inttypes.h>
 #include <stddef.h>
@@ -92,7 +91,7 @@ static void reentrant_callback(void *user_data, const struct timespec *ts) {
 
 static bool run_test_create_destroy() {
   cron_ctx_t *ctx = cron_create();
-  if (!ctx)
+  if (ctx == nullptr)
     return false;
   cron_destroy(ctx);
   return true;
@@ -100,7 +99,7 @@ static bool run_test_create_destroy() {
 
 static bool run_test_invalid_schedules() {
   cron_ctx_t *ctx = cron_create();
-  if (!ctx)
+  if (ctx == nullptr)
     return false;
 
   const char *bad[] = {"",                       /* empty */
@@ -125,7 +124,7 @@ static bool run_test_every_second() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
 
-  if (!cron_add(ctx, "0 * * * * * *", test_callback, nullptr)) {
+  if (cron_add(ctx, "0 * * * * * *", test_callback, nullptr) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -159,8 +158,8 @@ static bool run_test_nanosecond_precision() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
 
-  if (!cron_add(ctx, "250000000,750000000 * * * * * *", test_callback,
-                nullptr)) {
+  if (cron_add(ctx, "250000000,750000000 * * * * * *", test_callback,
+               nullptr) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -195,7 +194,7 @@ static bool run_test_dom_dow_logic() {
   reset_callback();
 
   /* 00:00:00.000 on the 1st of any month OR on Fridays (DOW=5) */
-  if (!cron_add(ctx, "0 0 0 0 1 * 5", test_callback, nullptr)) {
+  if (cron_add(ctx, "0 0 0 0 1 * 5", test_callback, nullptr) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -235,7 +234,7 @@ static bool run_test_weekdays() {
   reset_callback();
 
   /* 09:00:00.000 every Monday–Friday */
-  if (!cron_add(ctx, "0 0 0 9 * * 1-5", test_callback, nullptr)) {
+  if (cron_add(ctx, "0 0 0 9 * * 1-5", test_callback, nullptr) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -266,7 +265,7 @@ static bool run_test_job_removal() {
   reset_callback();
 
   cron_job_t *job = cron_add(ctx, "0 * * * * * *", test_callback, nullptr);
-  if (!job) {
+  if (job == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -338,7 +337,7 @@ static bool run_test_callback_remove_other_job() {
     return false;
   }
 
-  if (!cron_add(ctx, "0 * * * * * *", remove_other_callback, ctx)) {
+  if (cron_add(ctx, "0 * * * * * *", remove_other_callback, ctx) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -367,7 +366,7 @@ static bool run_test_reentrant_execute_due_dedup() {
   cron_ctx_t *ctx = cron_create();
   reentrant_callback_count = 0;
 
-  if (!cron_add(ctx, "0 * * * * * *", reentrant_callback, ctx)) {
+  if (cron_add(ctx, "0 * * * * * *", reentrant_callback, ctx) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -394,7 +393,7 @@ static bool run_test_next_trigger() {
   cron_ctx_t *ctx = cron_create();
 
   /* Weekdays at 09:30:00.000 */
-  if (!cron_add(ctx, "0 0 30 9 * * 1-5", test_callback, nullptr)) {
+  if (cron_add(ctx, "0 0 30 9 * * 1-5", test_callback, nullptr) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -424,11 +423,12 @@ static bool run_test_next_trigger() {
 
 static bool run_test_next_trigger_nanoseconds_and_strict() {
   cron_ctx_t *ctx = cron_create();
-  if (!ctx) {
+  if (ctx == nullptr) {
     return false;
   }
 
-  if (!cron_add(ctx, "0,500000000 * * * * * *", test_callback, nullptr)) {
+  if (cron_add(ctx, "0,500000000 * * * * * *", test_callback, nullptr) ==
+      nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -466,12 +466,12 @@ static bool run_test_next_trigger_nanoseconds_and_strict() {
 
 static bool run_test_next_trigger_dom_dow_logic() {
   cron_ctx_t *ctx = cron_create();
-  if (!ctx) {
+  if (ctx == nullptr) {
     return false;
   }
 
   /* 00:00:00.000 on day-of-month=1 OR day-of-week=Friday */
-  if (!cron_add(ctx, "0 0 0 0 1 * 5", test_callback, nullptr)) {
+  if (cron_add(ctx, "0 0 0 0 1 * 5", test_callback, nullptr) == nullptr) {
     cron_destroy(ctx);
     return false;
   }
@@ -546,7 +546,7 @@ static bool run_test_multiple_jobs() {
 /* ================================================================ */
 
 int main() {
-  printf("=== nanocron.h Test Suite (C23) ===\n\n");
+  printf("=== nanocron Test Suite (C23) ===\n\n");
 
   TEST(create_destroy);
   TEST(invalid_schedules);

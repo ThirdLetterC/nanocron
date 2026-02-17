@@ -3,8 +3,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define CRON_IMPLEMENTATION
-#include "nanocron.h"
+#include "nanocron/nanocron.h"
 
 void my_cb([[maybe_unused]] void *ud,
            [[maybe_unused]] const struct timespec *ts) {

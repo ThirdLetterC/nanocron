@@ -1,10 +1,11 @@
 # nanocron
 
-Single-header C23 cron scheduler with nanosecond precision.
+Small C23 cron scheduler library with nanosecond precision.
 
 ## Features
 
-- Header-only: include `nanocron.h`, no separate `.c` file.
+- Public API header at `include/nanocron/nanocron.h`.
+- Implementation in `src/nanocron.c`.
 - Full 7-field cron format with nanosecond field.
 - Supports wildcard, exact value, ranges, lists, and step expressions.
 - Implements vixie-cron day-of-month/day-of-week semantics:
@@ -52,7 +53,7 @@ Examples:
 
 #include <stdio.h>
 #include <time.h>
-#include "nanocron.h"
+#include "nanocron/nanocron.h"
 
 static void on_fire([[maybe_unused]] void *user_data,
                     const struct timespec *ts) {
@@ -85,7 +86,7 @@ int main() {
 Compile manually:
 
 ```bash
-clang -std=c23 -Wall -Wextra -Wpedantic -Werror -I. examples/simple.c -o examples/simple
+clang -std=c23 -Wall -Wextra -Wpedantic -Werror -Iinclude examples/simple.c src/nanocron.c -o examples/simple
 ```
 
 ## API

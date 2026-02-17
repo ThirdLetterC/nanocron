@@ -180,9 +180,13 @@ fn addCExecutable(b: *std.Build, options: CExecutableOptions) *std.Build.Step.Co
         .optimize = options.optimize,
         .link_libc = true,
     });
-    module.addIncludePath(b.path("."));
+    module.addIncludePath(b.path("include"));
     module.addCSourceFile(.{
         .file = b.path(options.source),
+        .flags = c_flags,
+    });
+    module.addCSourceFile(.{
+        .file = b.path("src/nanocron.c"),
         .flags = c_flags,
     });
 
@@ -196,6 +200,8 @@ fn addCExecutable(b: *std.Build, options: CExecutableOptions) *std.Build.Step.Co
     }
     if (options.target.result.os.tag == .linux) {
         exe.pie = true;
+        exe.link_z_relro = true;
+        exe.link_z_lazy = false;
     }
 
     if (options.link_math) {

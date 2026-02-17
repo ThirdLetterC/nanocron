@@ -1,44 +1,9 @@
-#pragma once
-
-/*
- * nanocron.h - Single-header C23 CRON library with full nanosecond precision
- *
- * Schedule format (exactly 7 whitespace-separated fields):
- *   nanosecond (0-999999999)  second (0-59)  minute (0-59)  hour (0-23)
- *   day-of-month (1-31)  month (1-12)  day-of-week (0-6, 0=Sunday)
- *
- * Per-field syntax (all fields support this):
- *   *          → any value
- *   42         → exact
- *   10-20      → range
- *   1,3,5      → list
- *   *\/15      → every 15 (from field minimum)
- *   10-50/5    → every 5 inside range
- *
- * Examples:
- *   "0 * * * * * *"                    → every second on the dot
- *   "*\/100000000 * * * * * *"         → 10× per second
- *   "0 30 9 * * 1-5 *"                 → weekdays 09:30:00.000000000 UTC
- *   "0 0 0 1 * *"                      → 1st of every month at midnight
- *
- * Standard vixie-cron DOM/DOW rule is implemented (when both fields are
- * restricted they are OR-ed, otherwise AND).
- *
- * C23 only, header-only, no external dependencies beyond <time.h>.
- * All allocations are explicit; user owns the context.
- */
+#include "nanocron/nanocron.h"
 
 #include <ctype.h>
-#include <stdint.h>
+#include <stdckdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-
-typedef void (*cron_callback_t)(void *user_data,
-                                const struct timespec *trigger_time);
-
-typedef struct cron_job cron_job_t;
-typedef struct cron_ctx cron_ctx_t;
 
 static constexpr size_t CRON_FIELD_COUNT = 7;
 static constexpr size_t CRON_MAX_ATOMS = 12;
@@ -60,9 +25,6 @@ typedef struct {
   size_t num_atoms;
   bool is_wildcard; /* true only if the field was exactly "*" */
 } cron_field;
-
-static inline int timespec_cmp(const struct timespec *a,
-                               const struct timespec *b);
 
 struct cron_job {
   cron_job_t *next;
@@ -86,7 +48,7 @@ static constexpr uint64_t CRON_FIELD_MAX[CRON_FIELD_COUNT] = {
 [[nodiscard]]
 static bool parse_u64(const char **cursor, uint64_t minv, uint64_t maxv,
                       uint64_t *out) {
-  if (!cursor || !(*cursor) || !out) {
+  if (cursor == nullptr || *cursor == nullptr || out == nullptr) {
     return false;
   }
 
@@ -114,13 +76,33 @@ static bool parse_u64(const char **cursor, uint64_t minv, uint64_t maxv,
   return true;
 }
 
+[[nodiscard]]
+static char *cron_strdup(const char *src) {
+  if (src == nullptr) {
+    return nullptr;
+  }
+
+  const size_t len = strlen(src);
+  size_t alloc_size = 0;
+  if (ckd_add(&alloc_size, len, (size_t)1)) {
+    return nullptr;
+  }
+
+  char *copy = calloc(alloc_size, sizeof(char));
+  if (copy == nullptr) {
+    return nullptr;
+  }
+  memcpy(copy, src, len);
+  return copy;
+}
+
 /* Hard part: parse one field. Supports lists, ranges, steps. */
 static bool parse_cron_field(const char *str, uint64_t minv, uint64_t maxv,
                              cron_field *f) {
   f->num_atoms = 0;
   f->is_wildcard = false;
 
-  if (!str || !*str)
+  if (str == nullptr || *str == '\0')
     return false;
 
   if (strcmp(str, "*") == 0) {
@@ -132,8 +114,8 @@ static bool parse_cron_field(const char *str, uint64_t minv, uint64_t maxv,
     return true;
   }
 
-  char *copy = strdup(str);
-  if (!copy)
+  char *copy = cron_strdup(str);
+  if (copy == nullptr)
     return false;
 
   char *part = copy;
@@ -198,7 +180,7 @@ static bool parse_cron_field(const char *str, uint64_t minv, uint64_t maxv,
     if (*p != '\0')
       goto fail;
 
-    /* "10/5" → start=10, end=max (standard cron semantics) */
+    /* "10/5" -> start=10, end=max (standard cron semantics) */
     if (step_u64 > 1 && !had_range) {
       end = maxv;
     }
@@ -223,11 +205,11 @@ fail:
 
 static bool parse_cron_expression(const char *expr,
                                   cron_field fields[CRON_FIELD_COUNT]) {
-  if (!expr)
+  if (expr == nullptr)
     return false;
 
-  char *copy = strdup(expr);
-  if (!copy)
+  char *copy = cron_strdup(expr);
+  if (copy == nullptr)
     return false;
 
   size_t idx = 0;
@@ -309,7 +291,7 @@ static bool non_day_fields_match(const cron_field fields[CRON_FIELD_COUNT],
 [[nodiscard]]
 static bool field_next_match(const cron_field *f, uint64_t min_candidate,
                              uint64_t maxv, uint64_t *out) {
-  if (!f || !out || min_candidate > maxv) {
+  if (f == nullptr || out == nullptr || min_candidate > maxv) {
     return false;
   }
 
@@ -332,7 +314,14 @@ static bool field_next_match(const cron_field *f, uint64_t min_candidate,
       const uint64_t step = (uint64_t)atom->step;
       const uint64_t delta = min_candidate - atom->start;
       const uint64_t rem = delta % step;
-      candidate = (rem == 0) ? min_candidate : (min_candidate + (step - rem));
+      if (rem == 0) {
+        candidate = min_candidate;
+      } else {
+        const uint64_t bump = step - rem;
+        if (ckd_add(&candidate, min_candidate, bump)) {
+          continue;
+        }
+      }
     }
 
     if (candidate > atom_end) {
@@ -354,7 +343,7 @@ static bool field_next_match(const cron_field *f, uint64_t min_candidate,
 
 [[nodiscard]]
 static cron_job_t **find_job_link(cron_ctx_t *ctx, const cron_job_t *job) {
-  if (!ctx || !job) {
+  if (ctx == nullptr || job == nullptr) {
     return nullptr;
   }
 
@@ -366,7 +355,7 @@ static cron_job_t **find_job_link(cron_ctx_t *ctx, const cron_job_t *job) {
 }
 
 static void sweep_removed_jobs(cron_ctx_t *ctx) {
-  if (!ctx) {
+  if (ctx == nullptr) {
     return;
   }
 
@@ -382,15 +371,17 @@ static void sweep_removed_jobs(cron_ctx_t *ctx) {
   }
 }
 
-/* === Public API === */
-
 [[nodiscard]]
 cron_ctx_t *cron_create() {
-  return calloc(1, sizeof(cron_ctx_t));
+  cron_ctx_t *ctx = calloc(1, sizeof(cron_ctx_t));
+  if (ctx == nullptr) {
+    return nullptr;
+  }
+  return ctx;
 }
 
 void cron_destroy(cron_ctx_t *ctx) {
-  if (!ctx)
+  if (ctx == nullptr)
     return;
   cron_job_t *j = ctx->jobs;
   while (j) {
@@ -401,11 +392,9 @@ void cron_destroy(cron_ctx_t *ctx) {
   free(ctx);
 }
 
-/* Returns opaque job handle for later removal, nullptr on parse error. */
-[[nodiscard]]
 cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
                      void *user_data) {
-  if (!ctx || !schedule || !cb)
+  if (ctx == nullptr || schedule == nullptr || cb == nullptr)
     return nullptr;
 
   cron_field fields[CRON_FIELD_COUNT] = {0};
@@ -413,7 +402,7 @@ cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
     return nullptr;
 
   cron_job_t *job = calloc(1, sizeof(cron_job_t));
-  if (!job)
+  if (job == nullptr)
     return nullptr;
 
   memcpy(job->fields, fields, sizeof(fields));
@@ -426,10 +415,9 @@ cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
   return job;
 }
 
-[[nodiscard]]
 bool cron_remove(cron_ctx_t *ctx, cron_job_t *job) {
   cron_job_t **link = find_job_link(ctx, job);
-  if (!link) {
+  if (link == nullptr) {
     return false;
   }
 
@@ -444,10 +432,8 @@ bool cron_remove(cron_ctx_t *ctx, cron_job_t *job) {
   return true;
 }
 
-/* Call with current time (UTC). Fires every matching job exactly once per
- * instant. */
 void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
-  if (!ctx || !now) {
+  if (ctx == nullptr || now == nullptr) {
     return;
   }
   if (now->tv_nsec < 0 || now->tv_nsec > 999'999'999L) {
@@ -455,7 +441,7 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   }
 
   struct tm tm;
-  if (!gmtime_r(&now->tv_sec, &tm)) {
+  if (gmtime_r(&now->tv_sec, &tm) == nullptr) {
     return;
   }
 
@@ -502,7 +488,6 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   }
 }
 
-/* Convenience: use current UTC time via C11 timespec_get */
 void cron_tick(cron_ctx_t *ctx) {
   struct timespec now;
   if (timespec_get(&now, TIME_UTC) == 0)
@@ -510,21 +495,23 @@ void cron_tick(cron_ctx_t *ctx) {
   cron_execute_due(ctx, &now);
 }
 
-/* Compute next trigger strictly after `after` (search horizon: 366 days). */
 [[nodiscard]]
 bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after,
                            struct timespec *next_out) {
-  if (!ctx || !after || !next_out)
+  if (ctx == nullptr || after == nullptr || next_out == nullptr)
     return false;
   if (after->tv_nsec < 0 || after->tv_nsec > 999'999'999L)
     return false;
 
   for (time_t sec_off = 0; sec_off < (time_t)CRON_LOOKAHEAD_SECONDS;
        sec_off++) {
-    const time_t sec = after->tv_sec + sec_off;
+    time_t sec = 0;
+    if (ckd_add(&sec, after->tv_sec, sec_off)) {
+      break;
+    }
 
     struct tm tm;
-    if (!gmtime_r(&sec, &tm))
+    if (gmtime_r(&sec, &tm) == nullptr)
       break;
 
     const uint64_t values[CRON_FIELD_COUNT] = {
@@ -582,13 +569,4 @@ bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after,
   }
 
   return false;
-}
-
-static inline int timespec_cmp(const struct timespec *a,
-                               const struct timespec *b) {
-  if (a->tv_sec != b->tv_sec)
-    return (a->tv_sec > b->tv_sec) ? 1 : -1;
-  if (a->tv_nsec != b->tv_nsec)
-    return (a->tv_nsec > b->tv_nsec) ? 1 : -1;
-  return 0;
 }
