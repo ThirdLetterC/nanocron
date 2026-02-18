@@ -9,6 +9,13 @@
  *
  * Standard vixie-cron DOM/DOW rule is implemented (when both fields are
  * restricted they are OR-ed, otherwise AND).
+ *
+ * Thread-safety: cron_ctx_t is not internally synchronized; callers must
+ * serialize access to each context instance.
+ *
+ * Reentrant destroy: calling cron_destroy() from inside a callback is
+ * supported. Destruction is deferred until the outermost cron_execute_due()
+ * unwinds. After that call returns, the context pointer is invalid.
  */
 
 #include <stdint.h>

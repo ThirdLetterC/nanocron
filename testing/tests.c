@@ -87,6 +87,13 @@ static void reentrant_callback(void *user_data, const struct timespec *ts) {
   }
 }
 
+static void destroy_ctx_callback(void *user_data,
+                                 [[maybe_unused]] const struct timespec *ts) {
+  cron_ctx_t *ctx = user_data;
+  callback_count++;
+  cron_destroy(ctx);
+}
+
 /* ================================================================ */
 
 static bool run_test_create_destroy() {
@@ -118,6 +125,25 @@ static bool run_test_invalid_schedules() {
   }
   cron_destroy(ctx);
   return true;
+}
+
+static bool run_test_schedule_length_limit() {
+  cron_ctx_t *ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  constexpr size_t long_len = 600;
+  char too_long[long_len + 1];
+  for (size_t i = 0; i < long_len; i++) {
+    too_long[i] = '1';
+  }
+  too_long[long_len] = '\0';
+
+  const bool rejected =
+      cron_add(ctx, too_long, test_callback, nullptr) == nullptr;
+  cron_destroy(ctx);
+  return rejected;
 }
 
 static bool run_test_every_second() {
@@ -321,6 +347,29 @@ static bool run_test_callback_self_removal() {
 
   cron_destroy(ctx);
   self_remove_job = nullptr;
+  return true;
+}
+
+static bool run_test_callback_destroy_context() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0 * * * * * *", destroy_ctx_callback, ctx) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t);
+
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
   return true;
 }
 
@@ -550,12 +599,14 @@ int main() {
 
   TEST(create_destroy);
   TEST(invalid_schedules);
+  TEST(schedule_length_limit);
   TEST(every_second);
   TEST(nanosecond_precision);
   TEST(dom_dow_logic);
   TEST(weekdays);
   TEST(job_removal);
   TEST(callback_self_removal);
+  TEST(callback_destroy_context);
   TEST(callback_remove_other_job);
   TEST(next_trigger);
   TEST(next_trigger_nanoseconds_and_strict);

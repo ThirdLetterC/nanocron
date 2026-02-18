@@ -7,6 +7,7 @@
 
 static constexpr size_t CRON_FIELD_COUNT = 7;
 static constexpr size_t CRON_MAX_ATOMS = 12;
+static constexpr size_t CRON_MAX_SCHEDULE_LENGTH = 512;
 static constexpr size_t CRON_DOM_FIELD = 4;
 static constexpr size_t CRON_DOW_FIELD = 6;
 static constexpr size_t CRON_SECONDS_PER_DAY = 86'400;
@@ -32,18 +33,36 @@ struct cron_job {
   cron_callback_t callback;
   void *user_data;
   struct timespec last_fired; /* de-duplication */
-  bool is_removed;            /* deferred removal marker */
+  bool has_last_fired;
+  bool is_removed; /* deferred removal marker */
 };
 
 struct cron_ctx {
   cron_job_t *jobs;
   size_t execution_depth; /* >0 while inside cron_execute_due */
+  bool destroy_requested;
 };
 
 static constexpr uint64_t CRON_FIELD_MIN[CRON_FIELD_COUNT] = {0, 0, 0, 0,
                                                               1, 1, 0};
 static constexpr uint64_t CRON_FIELD_MAX[CRON_FIELD_COUNT] = {
     999'999'999ULL, 59, 59, 23, 31, 12, 6};
+
+[[nodiscard]]
+static bool schedule_length_ok(const char *schedule) {
+  if (schedule == nullptr) {
+    return false;
+  }
+
+  size_t len = 0;
+  while (schedule[len] != '\0') {
+    if (len >= CRON_MAX_SCHEDULE_LENGTH) {
+      return false;
+    }
+    len++;
+  }
+  return true;
+}
 
 [[nodiscard]]
 static bool parse_u64(const char **cursor, uint64_t minv, uint64_t maxv,
@@ -206,6 +225,8 @@ fail:
 static bool parse_cron_expression(const char *expr,
                                   cron_field fields[CRON_FIELD_COUNT]) {
   if (expr == nullptr)
+    return false;
+  if (!schedule_length_ok(expr))
     return false;
 
   char *copy = cron_strdup(expr);
@@ -383,6 +404,10 @@ cron_ctx_t *cron_create() {
 void cron_destroy(cron_ctx_t *ctx) {
   if (ctx == nullptr)
     return;
+  if (ctx->execution_depth > 0) {
+    ctx->destroy_requested = true;
+    return;
+  }
   cron_job_t *j = ctx->jobs;
   while (j) {
     cron_job_t *nxt = j->next;
@@ -396,6 +421,10 @@ cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
                      void *user_data) {
   if (ctx == nullptr || schedule == nullptr || cb == nullptr)
     return nullptr;
+  if (ctx->destroy_requested)
+    return nullptr;
+  if (!schedule_length_ok(schedule))
+    return nullptr;
 
   cron_field fields[CRON_FIELD_COUNT] = {0};
   if (!parse_cron_expression(schedule, fields))
@@ -408,7 +437,6 @@ cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
   memcpy(job->fields, fields, sizeof(fields));
   job->callback = cb;
   job->user_data = user_data;
-  job->last_fired.tv_sec = (time_t)-1; /* sentinel */
 
   job->next = ctx->jobs;
   ctx->jobs = job;
@@ -416,6 +444,9 @@ cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
 }
 
 bool cron_remove(cron_ctx_t *ctx, cron_job_t *job) {
+  if (ctx == nullptr || ctx->destroy_requested) {
+    return false;
+  }
   cron_job_t **link = find_job_link(ctx, job);
   if (link == nullptr) {
     return false;
@@ -436,6 +467,9 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   if (ctx == nullptr || now == nullptr) {
     return;
   }
+  if (ctx->destroy_requested) {
+    return;
+  }
   if (now->tv_nsec < 0 || now->tv_nsec > 999'999'999L) {
     return;
   }
@@ -453,6 +487,9 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   ctx->execution_depth++;
   cron_job_t *job = ctx->jobs;
   while (job) {
+    if (ctx->destroy_requested) {
+      break;
+    }
     cron_job_t *next = job->next;
 
     if (job->is_removed) {
@@ -471,11 +508,12 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
 
     if (day_ok) {
       /* Fire only once per distinct nanosecond instant */
-      if (now->tv_sec > job->last_fired.tv_sec ||
+      if (!job->has_last_fired || now->tv_sec > job->last_fired.tv_sec ||
           (now->tv_sec == job->last_fired.tv_sec &&
            now->tv_nsec > job->last_fired.tv_nsec)) {
 
         job->last_fired = *now; /* set before callback for reentrant safety */
+        job->has_last_fired = true;
         job->callback(job->user_data, now);
       }
     }
@@ -485,6 +523,16 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   ctx->execution_depth--;
   if (ctx->execution_depth == 0) {
     sweep_removed_jobs(ctx);
+    if (ctx->destroy_requested) {
+      cron_job_t *job = ctx->jobs;
+      while (job) {
+        cron_job_t *next = job->next;
+        free(job);
+        job = next;
+      }
+      free(ctx);
+      return;
+    }
   }
 }
 
@@ -499,6 +547,8 @@ void cron_tick(cron_ctx_t *ctx) {
 bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after,
                            struct timespec *next_out) {
   if (ctx == nullptr || after == nullptr || next_out == nullptr)
+    return false;
+  if (ctx->destroy_requested)
     return false;
   if (after->tv_nsec < 0 || after->tv_nsec > 999'999'999L)
     return false;

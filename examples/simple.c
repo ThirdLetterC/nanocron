@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -25,10 +26,13 @@ int main() {
     cron_tick(ctx);
     /* Tick once per second to avoid repeated firings within a matching second.
      */
-    struct timespec ts;
-    ts.tv_sec = 1;
-    ts.tv_nsec = 0;
-    nanosleep(&ts, nullptr);
+    struct timespec ts = {.tv_sec = 1, .tv_nsec = 0};
+    while (nanosleep(&ts, &ts) == -1) {
+      if (errno != EINTR) {
+        cron_destroy(ctx);
+        return 1;
+      }
+    }
   }
 
   cron_destroy(ctx);
