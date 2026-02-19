@@ -556,6 +556,107 @@ static bool run_test_next_trigger_dom_dow_logic() {
   return true;
 }
 
+static bool run_test_execute_between_catch_up() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0 * * * * * *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  const struct timespec after = make_ts(1739788200, 0);
+  const struct timespec until = make_ts(1739788203, 0);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (callback_count != 3 || last_call_ts.tv_sec != 1739788203 ||
+      last_call_ts.tv_nsec != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_execute_between_strict_lower_bound() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0,500000000 * * * * * *", test_callback, nullptr) ==
+      nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1739788200, 0);
+  struct timespec until = make_ts(1739788200, 500000000);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (callback_count != 1 || last_call_ts.tv_sec != 1739788200 ||
+      last_call_ts.tv_nsec != 500000000L) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  reset_callback();
+  after = make_ts(1739788200, 500000000);
+  until = make_ts(1739788201, 0);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (callback_count != 1 || last_call_ts.tv_sec != 1739788201 ||
+      last_call_ts.tv_nsec != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_execute_between_reverse_window_noop() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0 * * * * * *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  const struct timespec after = make_ts(1739788205, 0);
+  const struct timespec until = make_ts(1739788204, 0);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
 static bool run_test_multiple_jobs() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
@@ -611,6 +712,9 @@ int main() {
   TEST(next_trigger);
   TEST(next_trigger_nanoseconds_and_strict);
   TEST(next_trigger_dom_dow_logic);
+  TEST(execute_between_catch_up);
+  TEST(execute_between_strict_lower_bound);
+  TEST(execute_between_reverse_window_noop);
   TEST(reentrant_execute_due_dedup);
   TEST(multiple_jobs);
 

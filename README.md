@@ -12,6 +12,7 @@ Small C23 cron scheduler library with nanosecond precision.
   - If both DOM and DOW are restricted, they are OR-ed.
   - If either DOM or DOW is `*`, they are AND-ed.
 - `cron_get_next_trigger` computes the next matching instant strictly after a given time.
+- `cron_execute_between` replays missed instants over a bounded UTC time window.
 - C23-first implementation with strict warning flags in project build scripts.
 
 ## Schedule Format
@@ -103,6 +104,8 @@ clang -std=c23 -Wall -Wextra -Wpedantic -Werror -Iinclude examples/simple.c src/
   - Executes callbacks due at `now` (UTC).
 - `void cron_tick(cron_ctx_t *ctx)`
   - Convenience wrapper using current UTC time via `timespec_get`.
+- `bool cron_execute_between(cron_ctx_t *ctx, const struct timespec *after, const struct timespec *until)`
+  - Executes all due instants in (`after`, `until`] (UTC), useful for catch-up after sleep or scheduling delays.
 - `bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after, struct timespec *next_out)`
   - Finds the next trigger strictly after `after` (search horizon: 366 days).
 
@@ -140,6 +143,7 @@ The project builds with:
 - Time handling is UTC-based (`gmtime_r`, `timespec_get`).
 - Callback execution is synchronous in the calling thread.
 - The scheduler context is not thread-safe; synchronize externally if shared.
+- For deterministic catch-up, compute absolute wake instants and call `cron_execute_between`.
 
 ## License
 

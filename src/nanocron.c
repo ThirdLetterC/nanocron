@@ -49,6 +49,29 @@ static constexpr uint64_t CRON_FIELD_MAX[CRON_FIELD_COUNT] = {
     999'999'999ULL, 59, 59, 23, 31, 12, 6};
 
 [[nodiscard]]
+static bool timespec_is_valid(const struct timespec *ts) {
+  return ts != nullptr && ts->tv_nsec >= 0 && ts->tv_nsec <= 999'999'999L;
+}
+
+[[nodiscard]]
+static int timespec_compare(const struct timespec *lhs,
+                            const struct timespec *rhs) {
+  if (lhs->tv_sec < rhs->tv_sec) {
+    return -1;
+  }
+  if (lhs->tv_sec > rhs->tv_sec) {
+    return 1;
+  }
+  if (lhs->tv_nsec < rhs->tv_nsec) {
+    return -1;
+  }
+  if (lhs->tv_nsec > rhs->tv_nsec) {
+    return 1;
+  }
+  return 0;
+}
+
+[[nodiscard]]
 static bool schedule_length_ok(const char *schedule) {
   if (schedule == nullptr) {
     return false;
@@ -392,6 +415,23 @@ static void sweep_removed_jobs(cron_ctx_t *ctx) {
   }
 }
 
+static void finalize_execution_scope(cron_ctx_t *ctx) {
+  if (ctx == nullptr || ctx->execution_depth != 0) {
+    return;
+  }
+
+  sweep_removed_jobs(ctx);
+  if (ctx->destroy_requested) {
+    cron_job_t *job = ctx->jobs;
+    while (job) {
+      cron_job_t *next = job->next;
+      free(job);
+      job = next;
+    }
+    free(ctx);
+  }
+}
+
 [[nodiscard]]
 cron_ctx_t *cron_create() {
   cron_ctx_t *ctx = calloc(1, sizeof(cron_ctx_t));
@@ -470,7 +510,7 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   if (ctx->destroy_requested) {
     return;
   }
-  if (now->tv_nsec < 0 || now->tv_nsec > 999'999'999L) {
+  if (!timespec_is_valid(now)) {
     return;
   }
 
@@ -521,19 +561,7 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   }
 
   ctx->execution_depth--;
-  if (ctx->execution_depth == 0) {
-    sweep_removed_jobs(ctx);
-    if (ctx->destroy_requested) {
-      cron_job_t *job = ctx->jobs;
-      while (job) {
-        cron_job_t *next = job->next;
-        free(job);
-        job = next;
-      }
-      free(ctx);
-      return;
-    }
-  }
+  finalize_execution_scope(ctx);
 }
 
 void cron_tick(cron_ctx_t *ctx) {
@@ -544,13 +572,52 @@ void cron_tick(cron_ctx_t *ctx) {
 }
 
 [[nodiscard]]
+bool cron_execute_between(cron_ctx_t *ctx, const struct timespec *after,
+                          const struct timespec *until) {
+  if (ctx == nullptr || after == nullptr || until == nullptr) {
+    return false;
+  }
+  if (ctx->destroy_requested) {
+    return false;
+  }
+  if (!timespec_is_valid(after) || !timespec_is_valid(until)) {
+    return false;
+  }
+  if (timespec_compare(until, after) <= 0) {
+    return true;
+  }
+
+  struct timespec cursor = *after;
+
+  ctx->execution_depth++;
+  while (!ctx->destroy_requested) {
+    struct timespec next = {0};
+    if (!cron_get_next_trigger(ctx, &cursor, &next)) {
+      break;
+    }
+    if (timespec_compare(&next, until) > 0) {
+      break;
+    }
+    cron_execute_due(ctx, &next);
+    if (ctx->destroy_requested) {
+      break;
+    }
+    cursor = next;
+  }
+  ctx->execution_depth--;
+  finalize_execution_scope(ctx);
+
+  return true;
+}
+
+[[nodiscard]]
 bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after,
                            struct timespec *next_out) {
   if (ctx == nullptr || after == nullptr || next_out == nullptr)
     return false;
   if (ctx->destroy_requested)
     return false;
-  if (after->tv_nsec < 0 || after->tv_nsec > 999'999'999L)
+  if (!timespec_is_valid(after))
     return false;
 
   for (time_t sec_off = 0; sec_off < (time_t)CRON_LOOKAHEAD_SECONDS;

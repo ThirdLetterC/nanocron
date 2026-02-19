@@ -47,6 +47,11 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now);
 /* Convenience: use current UTC time via standard timespec_get */
 void cron_tick(cron_ctx_t *ctx);
 
+/* Execute all scheduled instants in the window (`after`, `until`] (UTC). */
+[[nodiscard]]
+bool cron_execute_between(cron_ctx_t *ctx, const struct timespec *after,
+                          const struct timespec *until);
+
 /* Compute next trigger strictly after `after` (search horizon: 366 days). */
 [[nodiscard]]
 bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after,
