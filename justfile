@@ -3,7 +3,7 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 cc := env_var_or_default("CC", "clang")
 std := env_var_or_default("STD", "-std=c23")
 warn := env_var_or_default("WARN", "-Wall -Wextra -Wpedantic -Werror")
-hard := env_var_or_default("HARD", "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fPIE")
+hard := env_var_or_default("HARD", "-fstack-protector-strong -D_FORTIFY_SOURCE=3 -D_POSIX_C_SOURCE=200809L -fPIE")
 inc := env_var_or_default("INC", "-Iinclude")
 ld_hard := env_var_or_default("LD_HARD", "-Wl,-z,relro,-z,now -pie")
 san := env_var_or_default("SAN", "-fsanitize=address,undefined,leak -fno-omit-frame-pointer")

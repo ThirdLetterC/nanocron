@@ -51,8 +51,6 @@ Examples:
 ## Quick Start
 
 ```c
-#define _POSIX_C_SOURCE 200809L
-
 #include <stdio.h>
 #include <time.h>
 #include "nanocron/nanocron.h"
@@ -88,7 +86,7 @@ int main() {
 Compile manually:
 
 ```bash
-clang -std=c23 -Wall -Wextra -Wpedantic -Werror -Iinclude examples/simple.c src/nanocron.c -o examples/simple
+clang -std=c23 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iinclude examples/simple.c src/nanocron.c -o examples/simple
 ```
 
 ## API
@@ -128,8 +126,6 @@ instant, then pass it to `cron_set_timezone_offset_minutes`.
 Use runtime conversion so DST changes are handled correctly:
 
 ```c
-#define _POSIX_C_SOURCE 200809L
-
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
