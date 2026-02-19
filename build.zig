@@ -8,6 +8,7 @@ const warning_flags: []const []const u8 = &.{
     "-Werror",
     "-fstack-protector-strong",
     "-D_FORTIFY_SOURCE=3",
+    "-D_POSIX_C_SOURCE=200809L",
     "-fPIE",
 };
 
@@ -19,6 +20,7 @@ const debug_warning_flags: []const []const u8 = &.{
     "-Werror",
     "-fstack-protector-strong",
     "-D_FORTIFY_SOURCE=3",
+    "-D_POSIX_C_SOURCE=200809L",
     "-fPIE",
     "-fsanitize=address,undefined,leak",
     "-fno-omit-frame-pointer",
