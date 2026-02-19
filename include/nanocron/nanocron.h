@@ -41,11 +41,22 @@ cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
 bool cron_remove(cron_ctx_t *ctx, cron_job_t *job);
 
 /* Call with current time (UTC). Fires every matching job exactly once per
- * instant. */
+ * instant, using the context's configured timezone offset for schedule
+ * matching. */
 void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now);
 
 /* Convenience: use current UTC time via standard timespec_get */
 void cron_tick(cron_ctx_t *ctx);
+
+/* Set fixed timezone offset used for schedule evaluation (minutes from UTC).
+ * Default is 0 (UTC). This is a fixed offset and does not apply DST rules. */
+[[nodiscard]]
+bool cron_set_timezone_offset_minutes(cron_ctx_t *ctx,
+                                      int32_t utc_offset_minutes);
+
+/* Returns fixed timezone offset in minutes from UTC (or 0 for nullptr). */
+[[nodiscard]]
+int32_t cron_get_timezone_offset_minutes(const cron_ctx_t *ctx);
 
 /* Execute all scheduled instants in the window (`after`, `until`] (UTC). */
 [[nodiscard]]

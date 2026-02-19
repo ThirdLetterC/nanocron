@@ -14,6 +14,8 @@ static constexpr size_t CRON_SECONDS_PER_DAY = 86'400;
 static constexpr size_t CRON_LOOKAHEAD_DAYS = 366;
 static constexpr size_t CRON_LOOKAHEAD_SECONDS =
     CRON_LOOKAHEAD_DAYS * CRON_SECONDS_PER_DAY;
+static constexpr int32_t CRON_TZ_OFFSET_MINUTES_MIN = -1'440;
+static constexpr int32_t CRON_TZ_OFFSET_MINUTES_MAX = 1'440;
 
 typedef struct {
   uint64_t start;
@@ -41,6 +43,7 @@ struct cron_ctx {
   cron_job_t *jobs;
   size_t execution_depth; /* >0 while inside cron_execute_due */
   bool destroy_requested;
+  int32_t timezone_offset_minutes;
 };
 
 static constexpr uint64_t CRON_FIELD_MIN[CRON_FIELD_COUNT] = {0, 0, 0, 0,
@@ -69,6 +72,29 @@ static int timespec_compare(const struct timespec *lhs,
     return 1;
   }
   return 0;
+}
+
+[[nodiscard]]
+static bool seconds_to_schedule_tm(const cron_ctx_t *ctx, time_t utc_seconds,
+                                   struct tm *out) {
+  if (ctx == nullptr || out == nullptr) {
+    return false;
+  }
+
+  time_t schedule_seconds = utc_seconds;
+  if (ctx->timezone_offset_minutes > 0) {
+    const time_t offset_seconds = (time_t)ctx->timezone_offset_minutes * 60;
+    if (ckd_add(&schedule_seconds, utc_seconds, offset_seconds)) {
+      return false;
+    }
+  } else if (ctx->timezone_offset_minutes < 0) {
+    const time_t offset_seconds = (time_t)(-ctx->timezone_offset_minutes) * 60;
+    if (ckd_sub(&schedule_seconds, utc_seconds, offset_seconds)) {
+      return false;
+    }
+  }
+
+  return gmtime_r(&schedule_seconds, out) != nullptr;
 }
 
 [[nodiscard]]
@@ -457,6 +483,29 @@ void cron_destroy(cron_ctx_t *ctx) {
   free(ctx);
 }
 
+[[nodiscard]]
+bool cron_set_timezone_offset_minutes(cron_ctx_t *ctx,
+                                      int32_t utc_offset_minutes) {
+  if (ctx == nullptr || ctx->destroy_requested) {
+    return false;
+  }
+  if (utc_offset_minutes < CRON_TZ_OFFSET_MINUTES_MIN ||
+      utc_offset_minutes > CRON_TZ_OFFSET_MINUTES_MAX) {
+    return false;
+  }
+
+  ctx->timezone_offset_minutes = utc_offset_minutes;
+  return true;
+}
+
+[[nodiscard]]
+int32_t cron_get_timezone_offset_minutes(const cron_ctx_t *ctx) {
+  if (ctx == nullptr) {
+    return 0;
+  }
+  return ctx->timezone_offset_minutes;
+}
+
 cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb,
                      void *user_data) {
   if (ctx == nullptr || schedule == nullptr || cb == nullptr)
@@ -515,7 +564,7 @@ void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now) {
   }
 
   struct tm tm;
-  if (gmtime_r(&now->tv_sec, &tm) == nullptr) {
+  if (!seconds_to_schedule_tm(ctx, now->tv_sec, &tm)) {
     return;
   }
 
@@ -628,7 +677,7 @@ bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after,
     }
 
     struct tm tm;
-    if (gmtime_r(&sec, &tm) == nullptr)
+    if (!seconds_to_schedule_tm(ctx, sec, &tm))
       break;
 
     const uint64_t values[CRON_FIELD_COUNT] = {

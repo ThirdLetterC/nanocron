@@ -286,6 +286,125 @@ static bool run_test_weekdays() {
   return true;
 }
 
+static bool run_test_timezone_offset_execute_due() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (!cron_set_timezone_offset_minutes(ctx, 120)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 09:30 local time (UTC+02:00), Monday-Friday */
+  if (cron_add(ctx, "0 0 30 9 * * 1-5", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-17 07:30:00 UTC -> 09:30:00 local Monday -> fires */
+  struct timespec t = make_ts(1739777400, 0);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-17 09:30:00 UTC -> 11:30:00 local -> no additional fire */
+  t = make_ts(1739784600, 0);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_timezone_offset_next_trigger() {
+  cron_ctx_t *ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (!cron_set_timezone_offset_minutes(ctx, 120)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 09:30 local time (UTC+02:00), Monday-Friday */
+  if (cron_add(ctx, "0 0 30 9 * * 1-5", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1739777399, 0);
+  struct timespec next = {0};
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (next.tv_sec != 1739777400 || next.tv_nsec != 0) {
+    fprintf(stderr, "  expected 1739777400.000000000, got %lld.%09ld\n",
+            (long long)next.tv_sec, next.tv_nsec);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  after = make_ts(1739777400, 0); /* exact trigger instant */
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (next.tv_sec != 1739863800 || next.tv_nsec != 0) {
+    fprintf(stderr, "  expected 1739863800.000000000, got %lld.%09ld\n",
+            (long long)next.tv_sec, next.tv_nsec);
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_timezone_offset_validation() {
+  cron_ctx_t *ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_get_timezone_offset_minutes(ctx) != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (cron_set_timezone_offset_minutes(ctx, 1'441)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (cron_set_timezone_offset_minutes(ctx, -1'441)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (!cron_set_timezone_offset_minutes(ctx, -480)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (cron_get_timezone_offset_minutes(ctx) != -480) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
 static bool run_test_job_removal() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
@@ -705,6 +824,9 @@ int main() {
   TEST(nanosecond_precision);
   TEST(dom_dow_logic);
   TEST(weekdays);
+  TEST(timezone_offset_execute_due);
+  TEST(timezone_offset_next_trigger);
+  TEST(timezone_offset_validation);
   TEST(job_removal);
   TEST(callback_self_removal);
   TEST(callback_destroy_context);
