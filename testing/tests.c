@@ -46,6 +46,15 @@ static cron_job_t *other_job_handle = nullptr;
 static bool remove_other_result = false;
 static size_t remover_callback_count = 0;
 static size_t reentrant_callback_count = 0;
+static cron_job_t *guard_victim_job = nullptr;
+static bool guard_remove_victim_result = false;
+static bool guard_removed_job_visible_next = false;
+static bool guard_set_tz_after_destroy = true;
+static cron_job_t *guard_add_after_destroy = (cron_job_t *)1;
+static bool guard_remove_after_destroy = true;
+static bool guard_between_after_destroy = true;
+static bool guard_next_after_destroy = true;
+static size_t destroy_guard_callback_count = 0;
 
 static void test_callback([[maybe_unused]] void *user_data,
                           [[maybe_unused]] const struct timespec *ts) {
@@ -94,6 +103,31 @@ static void destroy_ctx_callback(void *user_data,
   cron_destroy(ctx);
 }
 
+static void destroy_guard_callback(void *user_data, const struct timespec *ts) {
+  cron_ctx_t *ctx = user_data;
+  destroy_guard_callback_count++;
+
+  if (guard_victim_job != nullptr) {
+    guard_remove_victim_result = cron_remove(ctx, guard_victim_job);
+    guard_victim_job = nullptr;
+  }
+
+  struct timespec next = {0};
+  guard_removed_job_visible_next = cron_get_next_trigger(ctx, ts, &next);
+
+  cron_destroy(ctx);
+
+  guard_set_tz_after_destroy = cron_set_timezone_offset_minutes(ctx, 60);
+  guard_add_after_destroy =
+      cron_add(ctx, "0 * * * * * *", test_callback, nullptr);
+  guard_remove_after_destroy = cron_remove(ctx, nullptr);
+
+  struct timespec until = *ts;
+  until.tv_sec++;
+  guard_between_after_destroy = cron_execute_between(ctx, ts, &until);
+  guard_next_after_destroy = cron_get_next_trigger(ctx, ts, &next);
+}
+
 /* ================================================================ */
 
 static bool run_test_create_destroy() {
@@ -109,12 +143,18 @@ static bool run_test_invalid_schedules() {
   if (ctx == nullptr)
     return false;
 
-  const char *bad[] = {"",                       /* empty */
-                       "* * * * *",              /* 5 fields */
-                       "* * * * * * * *",        /* 8 fields */
-                       "1000000000 * * * * * *", /* ns > 999999999 */
-                       "abc * * * * * *",        /* invalid token */
-                       "* 60 * * * * *",         /* sec > 59 */
+  const char *bad[] = {"",                                 /* empty */
+                       "* * * * *",                        /* 5 fields */
+                       "* * * * * * * *",                  /* 8 fields */
+                       "1000000000 * * * * * *",           /* ns > 999999999 */
+                       "abc * * * * * *",                  /* invalid token */
+                       "* 60 * * * * *",                   /* sec > 59 */
+                       "18446744073709551616 * * * * * *", /* u64 overflow */
+                       "0, * * * * * *",                   /* trailing comma */
+                       "1-2-3 * * * * * *",                /* malformed range */
+                       "0-10/0 * * * * * *",               /* zero step */
+                       "0/4294967296 * * * * * *",         /* step > uint32 */
+                       "0,1,2,3,4,5,6,7,8,9,10,11,12 * * * * * *", /* >12 */
                        nullptr};
 
   for (size_t i = 0; bad[i]; i++) {
@@ -144,6 +184,30 @@ static bool run_test_schedule_length_limit() {
       cron_add(ctx, too_long, test_callback, nullptr) == nullptr;
   cron_destroy(ctx);
   return rejected;
+}
+
+static bool run_test_whitespace_and_step_parsing() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "   */250000000  * * * * * *   ", test_callback, nullptr) ==
+      nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 500000000);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
 }
 
 static bool run_test_every_second() {
@@ -313,6 +377,44 @@ static bool run_test_timezone_offset_execute_due() {
   }
 
   /* 2025-02-17 09:30:00 UTC -> 11:30:00 local -> no additional fire */
+  t = make_ts(1739784600, 0);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_timezone_offset_execute_due_negative() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (!cron_set_timezone_offset_minutes(ctx, -120)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 09:30 local time (UTC-02:00), Monday-Friday */
+  if (cron_add(ctx, "0 0 30 9 * * 1-5", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-17 11:30:00 UTC -> 09:30:00 local Monday -> fires */
+  struct timespec t = make_ts(1739791800, 0);
+  cron_execute_due(ctx, &t);
+  if (callback_count != 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* 2025-02-17 09:30:00 UTC -> 07:30:00 local -> no additional fire */
   t = make_ts(1739784600, 0);
   cron_execute_due(ctx, &t);
   if (callback_count != 1) {
@@ -557,6 +659,169 @@ static bool run_test_reentrant_execute_due_dedup() {
   return true;
 }
 
+static bool run_test_api_input_validation() {
+  cron_destroy(nullptr);
+
+  if (cron_get_timezone_offset_minutes(nullptr) != 0) {
+    return false;
+  }
+  if (cron_set_timezone_offset_minutes(nullptr, 60)) {
+    return false;
+  }
+
+  if (cron_add(nullptr, "0 * * * * * *", test_callback, nullptr) != nullptr) {
+    return false;
+  }
+
+  cron_ctx_t *ctx = cron_create();
+  cron_ctx_t *ctx_other = cron_create();
+  reset_callback();
+  if (ctx == nullptr || ctx_other == nullptr) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  if (cron_add(ctx, nullptr, test_callback, nullptr) != nullptr) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_add(ctx, "0 * * * * * *", nullptr, nullptr) != nullptr) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  if (cron_remove(nullptr, nullptr)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_remove(ctx, nullptr)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  cron_job_t *foreign_job =
+      cron_add(ctx_other, "0 * * * * * *", test_callback, nullptr);
+  if (foreign_job == nullptr) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_remove(ctx, foreign_job)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  if (cron_add(ctx, "* * * * * * *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  struct timespec invalid_low = make_ts(1739788200, -1);
+  struct timespec invalid_high = make_ts(1739788200, 1'000'000'000);
+  cron_execute_due(ctx, &invalid_low);
+  cron_execute_due(ctx, &invalid_high);
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  struct timespec valid = make_ts(1739788200, 0);
+  cron_execute_due(nullptr, &valid);
+  cron_execute_due(ctx, nullptr);
+
+  struct timespec next = {0};
+  if (cron_get_next_trigger(nullptr, &valid, &next)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_get_next_trigger(ctx, nullptr, &next)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_get_next_trigger(ctx, &valid, nullptr)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_get_next_trigger(ctx, &invalid_low, &next)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  if (cron_execute_between(nullptr, &valid, &valid)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_execute_between(ctx, nullptr, &valid)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_execute_between(ctx, &valid, nullptr)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_execute_between(ctx, &invalid_low, &valid)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  cron_destroy(ctx_other);
+  return true;
+}
+
+static bool run_test_destroy_requested_guards_and_iteration_break() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  guard_victim_job = nullptr;
+  guard_remove_victim_result = false;
+  guard_removed_job_visible_next = false;
+  guard_set_tz_after_destroy = true;
+  guard_add_after_destroy = (cron_job_t *)1;
+  guard_remove_after_destroy = true;
+  guard_between_after_destroy = true;
+  guard_next_after_destroy = true;
+  destroy_guard_callback_count = 0;
+
+  guard_victim_job = cron_add(ctx, "0 * * * * * *", test_callback, nullptr);
+  if (guard_victim_job == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (cron_add(ctx, "0 * * * * * *", destroy_guard_callback, ctx) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec t = make_ts(1739788200, 0);
+  cron_execute_due(ctx, &t);
+
+  return destroy_guard_callback_count == 1 && callback_count == 0 &&
+         guard_remove_victim_result && guard_removed_job_visible_next &&
+         !guard_set_tz_after_destroy && guard_add_after_destroy == nullptr &&
+         !guard_remove_after_destroy && !guard_between_after_destroy &&
+         !guard_next_after_destroy;
+}
+
 static bool run_test_next_trigger() {
   cron_ctx_t *ctx = cron_create();
 
@@ -675,6 +940,73 @@ static bool run_test_next_trigger_dom_dow_logic() {
   return true;
 }
 
+static bool run_test_next_trigger_field_alignment() {
+  cron_ctx_t *ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "10/5 * * * * * *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1739788200, 12);
+  struct timespec next = {0};
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (next.tv_sec != 1739788200 || next.tv_nsec != 15) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  after = make_ts(1739788200, 14);
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (next.tv_sec != 1739788200 || next.tv_nsec != 15) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  after = make_ts(1739788200, 999999999);
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (next.tv_sec != 1739788201 || next.tv_nsec != 10) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+
+  ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+  if (cron_add(ctx, "10-12/5 * * * * * *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  after = make_ts(1739788200, 10);
+  if (!cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (next.tv_sec != 1739788201 || next.tv_nsec != 10) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
 static bool run_test_execute_between_catch_up() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
@@ -776,6 +1108,81 @@ static bool run_test_execute_between_reverse_window_noop() {
   return true;
 }
 
+static bool run_test_execute_between_edge_cases() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  /* Same-second reverse window exercises nsec ordering branch. */
+  struct timespec after = make_ts(1739788200, 500000000);
+  struct timespec until = make_ts(1739788200, 400000000);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  /* No jobs: window walk should stop when no next trigger exists. */
+  after = make_ts(1739788200, 0);
+  until = make_ts(1739788205, 0);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
+static bool run_test_execute_between_destroy_requested_break() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0 * * * * * *", destroy_ctx_callback, ctx) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  const struct timespec after = make_ts(1739788200, 0);
+  const struct timespec until = make_ts(1739788203, 0);
+  if (!cron_execute_between(ctx, &after, &until)) {
+    return false;
+  }
+
+  return callback_count == 1;
+}
+
+static bool run_test_tick_smoke() {
+  cron_tick(nullptr);
+
+  cron_ctx_t *ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "* * * * * * *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+  reset_callback();
+  cron_tick(ctx);
+  if (callback_count > 1) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
 static bool run_test_multiple_jobs() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
@@ -820,24 +1227,32 @@ int main() {
   TEST(create_destroy);
   TEST(invalid_schedules);
   TEST(schedule_length_limit);
+  TEST(whitespace_and_step_parsing);
   TEST(every_second);
   TEST(nanosecond_precision);
   TEST(dom_dow_logic);
   TEST(weekdays);
   TEST(timezone_offset_execute_due);
+  TEST(timezone_offset_execute_due_negative);
   TEST(timezone_offset_next_trigger);
   TEST(timezone_offset_validation);
   TEST(job_removal);
   TEST(callback_self_removal);
   TEST(callback_destroy_context);
   TEST(callback_remove_other_job);
+  TEST(api_input_validation);
+  TEST(destroy_requested_guards_and_iteration_break);
   TEST(next_trigger);
   TEST(next_trigger_nanoseconds_and_strict);
   TEST(next_trigger_dom_dow_logic);
+  TEST(next_trigger_field_alignment);
   TEST(execute_between_catch_up);
   TEST(execute_between_strict_lower_bound);
   TEST(execute_between_reverse_window_noop);
+  TEST(execute_between_edge_cases);
+  TEST(execute_between_destroy_requested_break);
   TEST(reentrant_execute_due_dedup);
+  TEST(tick_smoke);
   TEST(multiple_jobs);
 
   printf("\n=== SUMMARY ===\n");
