@@ -1,9 +1,18 @@
 #include "nanocron/nanocron.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdckdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * Security posture:
+ * - all caller-provided schedules, timestamps, and timezone offsets are
+ *   treated as untrusted input
+ * - callbacks are trusted code running synchronously in the caller thread
+ * - this module is not thread-safe; callers must serialize access per context
+ */
 
 static constexpr size_t CRON_FIELD_COUNT = 7;
 static constexpr size_t CRON_MAX_ATOMS = 12;
@@ -12,10 +21,13 @@ static constexpr size_t CRON_DOM_FIELD = 4;
 static constexpr size_t CRON_DOW_FIELD = 6;
 static constexpr size_t CRON_SECONDS_PER_DAY = 86'400;
 static constexpr size_t CRON_LOOKAHEAD_DAYS = 366;
-static constexpr size_t CRON_LOOKAHEAD_SECONDS =
-    CRON_LOOKAHEAD_DAYS * CRON_SECONDS_PER_DAY;
+static constexpr time_t CRON_LOOKAHEAD_SECONDS =
+    (time_t)(CRON_LOOKAHEAD_DAYS * CRON_SECONDS_PER_DAY);
 static constexpr int32_t CRON_TZ_OFFSET_MINUTES_MIN = -1'440;
 static constexpr int32_t CRON_TZ_OFFSET_MINUTES_MAX = 1'440;
+
+static_assert(999'999'999L <= LONG_MAX,
+              "timespec tv_nsec must accommodate nanocron precision");
 
 typedef struct {
   uint64_t start;
@@ -82,14 +94,10 @@ static bool seconds_to_schedule_tm(const cron_ctx_t *ctx, time_t utc_seconds,
   }
 
   time_t schedule_seconds = utc_seconds;
-  if (ctx->timezone_offset_minutes > 0) {
+  if (ctx->timezone_offset_minutes != 0) {
+    /* Multiplication is safe because the public API bounds the offset. */
     const time_t offset_seconds = (time_t)ctx->timezone_offset_minutes * 60;
     if (ckd_add(&schedule_seconds, utc_seconds, offset_seconds)) {
-      return false;
-    }
-  } else if (ctx->timezone_offset_minutes < 0) {
-    const time_t offset_seconds = (time_t)(-ctx->timezone_offset_minutes) * 60;
-    if (ckd_sub(&schedule_seconds, utc_seconds, offset_seconds)) {
       return false;
     }
   }

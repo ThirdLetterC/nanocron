@@ -7,6 +7,7 @@ Small C23 cron scheduler library with nanosecond precision.
 - Public API header at `include/nanocron/nanocron.h`.
 - Implementation in `src/nanocron.c`.
 - Full 7-field cron format with nanosecond field.
+- Strict input validation for schedule strings and `struct timespec` values.
 - Supports wildcard, exact value, ranges, lists, and step expressions.
 - Implements vixie-cron day-of-month/day-of-week semantics:
   - If both DOM and DOW are restricted, they are OR-ed.
@@ -21,6 +22,11 @@ Small C23 cron scheduler library with nanosecond precision.
 Every schedule must contain exactly 7 whitespace-separated fields:
 
 `nanosecond second minute hour day_of_month month day_of_week`
+
+Additional parser limits:
+
+- maximum schedule length: `512` bytes excluding the trailing NUL
+- maximum atoms per field: `12`
 
 | Field | Range |
 | --- | --- |
@@ -86,7 +92,10 @@ int main() {
 Compile manually:
 
 ```bash
-clang -std=c23 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iinclude examples/simple.c src/nanocron.c -o examples/simple
+clang -std=c23 -Wall -Wextra -Wpedantic -Werror \
+  -fstack-protector-strong -D_FORTIFY_SOURCE=3 -D_POSIX_C_SOURCE=200809L \
+  -fPIE -Iinclude examples/simple.c src/nanocron.c \
+  -Wl,-z,relro,-z,now -pie -o examples/simple
 ```
 
 ## API
@@ -95,12 +104,16 @@ clang -std=c23 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iincl
   - Allocates and returns a scheduler context, or `nullptr` on failure.
 - `void cron_destroy(cron_ctx_t *ctx)`
   - Frees all jobs and the context.
+  - After it completes, the `cron_ctx_t *` is invalid.
 - `cron_job_t *cron_add(cron_ctx_t *ctx, const char *schedule, cron_callback_t cb, void *user_data)`
   - Parses and registers a job. Returns a job handle or `nullptr`.
+  - Schedule strings longer than `512` bytes or with more than `12` atoms in a field are rejected.
 - `bool cron_remove(cron_ctx_t *ctx, cron_job_t *job)`
   - Removes a previously-added job handle.
+  - On success, the `cron_job_t *` is invalid immediately.
 - `void cron_execute_due(cron_ctx_t *ctx, const struct timespec *now)`
   - Executes callbacks due at `now` (UTC).
+  - Invalid `tv_nsec` values outside `[0, 999999999]` are ignored.
 - `void cron_tick(cron_ctx_t *ctx)`
   - Convenience wrapper using current UTC time via `timespec_get`.
 - `bool cron_set_timezone_offset_minutes(cron_ctx_t *ctx, int32_t utc_offset_minutes)`
@@ -109,8 +122,10 @@ clang -std=c23 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iincl
   - Gets fixed timezone offset in minutes (returns `0` for `nullptr`).
 - `bool cron_execute_between(cron_ctx_t *ctx, const struct timespec *after, const struct timespec *until)`
   - Executes all due instants in (`after`, `until`] (UTC), useful for catch-up after sleep or scheduling delays.
+  - Invalid `tv_nsec` values cause the call to fail closed.
 - `bool cron_get_next_trigger(const cron_ctx_t *ctx, const struct timespec *after, struct timespec *next_out)`
   - Finds the next trigger strictly after `after` (search horizon: 366 days).
+  - Returns `false` when the next match falls outside that bound.
 
 ## Timezone Offset From IANA Zone
 
@@ -128,10 +143,32 @@ Use runtime conversion so DST changes are handled correctly:
 ```c
 #include <ctype.h>
 #include <stdint.h>
+#include <stdckdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+[[nodiscard]]
+static char *dup_c_string(const char *src) {
+  if (src == nullptr) {
+    return nullptr;
+  }
+
+  const size_t len = strlen(src);
+  size_t alloc_size = 0;
+  if (ckd_add(&alloc_size, len, (size_t)1)) {
+    return nullptr;
+  }
+
+  char *copy = calloc(alloc_size, sizeof(char));
+  if (copy == nullptr) {
+    return nullptr;
+  }
+
+  memcpy(copy, src, len);
+  return copy;
+}
 
 [[nodiscard]]
 static bool parse_hhmm_offset_to_minutes(const char *hhmm,
@@ -160,7 +197,7 @@ static bool zone_offset_minutes_at(const char *iana_zone, time_t at_utc,
   }
 
   const char *old_tz = getenv("TZ");
-  char *saved_tz = (old_tz != nullptr) ? strdup(old_tz) : nullptr;
+  char *saved_tz = (old_tz != nullptr) ? dup_c_string(old_tz) : nullptr;
   if (old_tz != nullptr && saved_tz == nullptr) {
     return false;
   }
@@ -243,6 +280,7 @@ The project builds with:
 - Schedule matching uses a configurable fixed timezone offset per context.
 - Callback execution is synchronous in the calling thread.
 - The scheduler context is not thread-safe; synchronize externally if shared.
+- Deferred destruction from inside callbacks still invalidates the context as soon as the outermost execution call returns.
 - For deterministic catch-up, compute absolute wake instants and call `cron_execute_between`.
 
 ## License

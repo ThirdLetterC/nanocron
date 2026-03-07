@@ -7,6 +7,12 @@
  *   nanosecond (0-999999999)  second (0-59)  minute (0-59)  hour (0-23)
  *   day-of-month (1-31)  month (1-12)  day-of-week (0-6, 0=Sunday)
  *
+ * Public input contract:
+ * - schedule strings are untrusted input and must be at most 512 bytes
+ *   excluding the trailing NUL
+ * - `struct timespec` arguments with `tv_nsec` outside [0, 999999999] are
+ *   rejected
+ *
  * Standard vixie-cron DOM/DOW rule is implemented (when both fields are
  * restricted they are OR-ed, otherwise AND).
  *
@@ -16,6 +22,12 @@
  * Reentrant destroy: calling cron_destroy() from inside a callback is
  * supported. Destruction is deferred until the outermost cron_execute_due()
  * unwinds. After that call returns, the context pointer is invalid.
+ *
+ * Lifetime rules:
+ * - a `cron_job_t *` becomes invalid immediately after successful
+ *   `cron_remove()`
+ * - a `cron_ctx_t *` becomes invalid immediately after `cron_destroy()`
+ *   completes, including deferred destruction after execution unwinds
  */
 
 #include <stdint.h>

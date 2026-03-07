@@ -57,10 +57,10 @@ inside trusted callbacks. If they do, the library cannot contain that code.
     `[0, 999999999]`
 - Integer-sensitive operations use checked arithmetic from `<stdckdint.h>` for:
   - timezone offset application
-  - schedule string allocation sizing
+  - temporary schedule parse-buffer allocation sizing
   - next-trigger scan arithmetic
 - Allocation behavior is simple and explicit:
-  - contexts, jobs, and duplicated schedule buffers are allocated with
+  - contexts, jobs, and temporary schedule parse buffers are allocated with
     `calloc`
   - allocation failures are propagated as `nullptr` or `false`
 - Callback reentrancy is intentionally guarded:
@@ -128,6 +128,7 @@ The codebase includes unit coverage for:
 - timezone offset validation and matching
 - deferred job removal and deferred context destruction
 - API null/invalid-input handling
+- 366-day next-trigger lookahead bound behavior
 - bounded catch-up execution with `cron_execute_between`
 
 ## Out Of Scope

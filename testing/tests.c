@@ -758,6 +758,11 @@ static bool run_test_api_input_validation() {
     cron_destroy(ctx_other);
     return false;
   }
+  if (cron_get_next_trigger(ctx, &invalid_high, &next)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
 
   if (cron_execute_between(nullptr, &valid, &valid)) {
     cron_destroy(ctx);
@@ -775,6 +780,11 @@ static bool run_test_api_input_validation() {
     return false;
   }
   if (cron_execute_between(ctx, &invalid_low, &valid)) {
+    cron_destroy(ctx);
+    cron_destroy(ctx_other);
+    return false;
+  }
+  if (cron_execute_between(ctx, &valid, &invalid_high)) {
     cron_destroy(ctx);
     cron_destroy(ctx_other);
     return false;
@@ -1007,6 +1017,28 @@ static bool run_test_next_trigger_field_alignment() {
   return true;
 }
 
+static bool run_test_next_trigger_lookahead_bound() {
+  cron_ctx_t *ctx = cron_create();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0 0 0 0 29 2 *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  struct timespec after = make_ts(1740787200, 0); /* 2025-03-01 00:00:00 UTC */
+  struct timespec next = {0};
+  if (cron_get_next_trigger(ctx, &after, &next)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
 static bool run_test_execute_between_catch_up() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
@@ -1139,6 +1171,34 @@ static bool run_test_execute_between_edge_cases() {
   return true;
 }
 
+static bool run_test_execute_between_lookahead_bound() {
+  cron_ctx_t *ctx = cron_create();
+  reset_callback();
+  if (ctx == nullptr) {
+    return false;
+  }
+
+  if (cron_add(ctx, "0 0 0 0 29 2 *", test_callback, nullptr) == nullptr) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  const struct timespec after = make_ts(1740787200, 0);   /* 2025-03-01 UTC */
+  const struct timespec until = make_ts(1835395200, 0);   /* 2028-03-29 UTC */
+  if (!cron_execute_between(ctx, &after, &until)) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  if (callback_count != 0) {
+    cron_destroy(ctx);
+    return false;
+  }
+
+  cron_destroy(ctx);
+  return true;
+}
+
 static bool run_test_execute_between_destroy_requested_break() {
   cron_ctx_t *ctx = cron_create();
   reset_callback();
@@ -1246,10 +1306,12 @@ int main() {
   TEST(next_trigger_nanoseconds_and_strict);
   TEST(next_trigger_dom_dow_logic);
   TEST(next_trigger_field_alignment);
+  TEST(next_trigger_lookahead_bound);
   TEST(execute_between_catch_up);
   TEST(execute_between_strict_lower_bound);
   TEST(execute_between_reverse_window_noop);
   TEST(execute_between_edge_cases);
+  TEST(execute_between_lookahead_bound);
   TEST(execute_between_destroy_requested_break);
   TEST(reentrant_execute_due_dedup);
   TEST(tick_smoke);
